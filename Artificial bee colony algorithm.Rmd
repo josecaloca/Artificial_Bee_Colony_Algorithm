@@ -1,0 +1,431 @@
+---
+title: "Artificial Bee Colony Optimization"
+author: "Jose Caloca"
+date: "14/5/2021"
+output: html_document
+---
+
+# Artificial Bee Colony Optimization:
+
+Implements Karaboga (2005) Artificial Bee Colony (ABC) Optimization algorithm.
+
+## Parameters
+
+param par Initial values for the parameters to be optimized over
+
+param fn A function to be minimized, with first argument of the vector of parameters over which minimization is to take place. It should return a scalar result.
+
+param ... In the case of \code{abc_*}, further arguments to be passed to 'fn', otherwise, further arguments passed to the method.
+
+param FoodNumber Number of food sources to exploit. Notice that the
+
+param \code{NP} has been deprecated.
+
+param lb Lower bound of the parameters to be optimized.
+
+param ub Upper bound of the parameters to be optimized.
+
+param limit Limit of a food source.
+
+param maxCycle Maximum number of iterations.
+
+param optiinteger Whether to optimize binary parameters or not.
+
+param criter Stop criteria (numer of unchanged results) until stopping param parscale Numeric vector of length **length(par)**. Scale applied to the parameters.
+
+param fnscale Numeric scalar. Scale applied function. If **fnscale \< 0**, then the problem becomes a maximization problem.
+
+## details
+
+Upper and Lower bounds (***ub, lb***) equal to infinite will be replaced by either ***.Machine\$double.xmax or -.Machine\$double.xmax***
+
+If ***D*** (the number of parameters to be optimzed) is greater than one, then ***lb*** and ***ub*** can be either scalars (assuming that all the parameters share the same boundaries) or vectors (the parameters have different boundaries each other).
+
+return An list of class ***abc_answer***, holding the following elements:
+
+Foods : {Numeric matrix. Last position of the bees.}
+
+f: {Numeric vector. Value of the function evaluated at each set of Foods.}
+
+fitness: {Numeric vector. Fitness of each Foods.}
+
+trial :{Integer vector. Number of trials at each \code{Foods}.}
+
+value :{Numeric scalar. Value of the function evaluated at the optimum.}
+
+par: {Numeric vector. Optimum found.}
+
+counts: {Integer scalar. Number of cycles.}
+
+hist: {Numeric matrix. Trace of the global optimums.}
+
+# Algorithm definition
+
+```{r}
+artificial_bee_colony <- function(
+    par,               # Vector with parameters to optimise 
+    fn,                # Objective function
+    ...,               # Arguments of the function (M, x0, X, etc.)
+    FoodNumber  = 20,   # Fuentes de alimento 
+    lb          = rep(-Inf, length(par)),        # Lower limit of the distance
+    ub          = rep(+Inf, length(par)),        # Upper limit of the distance
+    limit       = 100,       # Limit how depleted a food source is
+    maxCycle    = 1000,   # Maximum number of iterations 
+    optiinteger = FALSE, # TRUE if we want to optimize on [0,1] (binary)
+    criter      = 50,
+    parscale    = rep(1, length(par)),
+    fnscale     = 1
+)
+{
+    D <- length(par)
+    
+    # Checking limits
+    if (length(lb) == 1 && length(par) > 1) lb <- rep(lb, D)
+    if (length(ub) == 1 && length(par) > 1) ub <- rep(ub, D)
+    
+    lb[is.infinite(lb)] <- -.Machine$double.xmax*1e-10
+    ub[is.infinite(ub)] <- .Machine$double.xmax*1e-10
+    
+    # Initial params
+    Foods       <- matrix(double(FoodNumber*D), nrow=FoodNumber)
+    f           <- double(FoodNumber)
+    fitness     <- double(FoodNumber)
+    trial       <- double(FoodNumber)
+    prob        <- double(FoodNumber)
+    solution    <- double(D)
+    ObjValSol   <- double(1)
+    FitnessSol  <- double(1)
+    neighbour   <- integer(1)
+    param2change<- integer(1)
+    GlobalMin   <- fn(par, ...) # double(1)
+    GlobalParams<- par #double(D)
+    #GlobalMins  <- double(runtime)
+    r           <- integer(1)
+    
+    # Fun
+    fun <- function(par) fn(par/parscale, ...)/fnscale
+    
+    # Fitness function
+    CalculateFitness <- function(fun)
+    {
+        if (fun >= 0) return(1/(fun + 1))
+        else return(1 + abs(fun))
+    }
+    # CalculateFitness(f[1])
+    
+    # The best food source is memorized
+    MemorizeBestSource <- function() 
+    {
+        oldGlobalMin <- GlobalMin
+        for(i in seq(1,FoodNumber)) {
+            if (f[i] < GlobalMin) {
+                GlobalMin <<- f[i]
+                
+                # Replacing new group of parameters
+                GlobalParams <<- Foods[i,]
+            }
+        }
+        
+        # Increasing persistance
+        if (oldGlobalMin == GlobalMin) persistance <<- persistance + 1
+        else persistance <<- 0
+    }
+    
+    # Variables are initialized in the range [lb,ub]. If each parameter has
+    # different range, use arrays lb[j], ub[j] instead of lb and ub 
+    # Counters of food sources are also initialized in this function
+    
+    init <- function(index, ...) {
+        if (optiinteger) Foods[index,] <<- runif(D) > .5
+        else {
+            Foods[index,] <<- sapply(1:D, function(k) runif(1,lb[k],ub[k]) )
+        }
+        
+        solution <<- Foods[index,]
+        
+        f[index] <<- fun(solution)
+        
+        fitness[index] <<- CalculateFitness(f[index])
+        trial[index] <<- 0
+        
+    }
+    # init(2)
+    
+    # All food sources are initialized
+    initial <- function() {
+        # For the first initialization we set the bees at
+        # specific places equaly distributed through the
+        # bounds.
+        Foods <<- 
+            sapply(1:D, function(k) {
+                seq(lb[k],ub[k],length.out=FoodNumber)
+            }
+            )
+        
+        for (i in 1:FoodNumber) {
+            solution <<- Foods[i,]
+            
+            f[i] <<- fun(solution)
+            
+            fitness[i] <<- CalculateFitness(f[i])
+            trial[i] <<- 0
+        }
+    }
+    
+    # initial()
+    
+    
+    SendEmployedBees <- function() {
+        for (i in 1:FoodNumber) {
+            # The parameter to be changed is determined randomly
+            param2change <- sample(1:D, 1) # floor(runif(1)*D) + 1 
+            
+            # A randomly chosen solution is used in producing a mutant solution of the solution i
+            # Randomly selected solution must be different from the solution i
+            neighbour <- i
+            while(neighbour==i)
+                neighbour <- sample(1:FoodNumber, 1) # floor(runif(1)*FoodNumber) + 1
+            
+            solution <<- Foods[i,]
+            
+            # v_{ij}=x_{ij}+\phi_{ij}*(x_{kj}-x_{ij}) 
+            
+            if (optiinteger) solution[param2change] <<- runif(1) > 0.5
+            else {
+                solution[param2change] <<- 
+                    Foods[i,param2change]+
+                    (Foods[i,param2change]-Foods[neighbour,param2change])*(runif(1)-0.5)*2
+                
+                # if generated parameter value is out of boundaries, it is shifted onto the boundaries
+                if (solution[param2change]<lb[param2change])
+                    solution[param2change]<<-lb[param2change]
+                
+                if (solution[param2change]>ub[param2change])
+                    solution[param2change]<<-ub[param2change]
+            }
+            
+            ObjValSol <<- fun(solution)
+            FitnessSol <<- CalculateFitness(ObjValSol)
+            
+            # a greedy selection is applied between the current solution i and its mutant*/
+            if (FitnessSol>fitness[i]) {
+                # If the mutant solution is better than the current solution i, replace the solution with the mutant and reset the trial counter of solution i*/
+                trial[i] <<- 0;
+                #for(j in 1:D) Foods[i,j] <<- solution[j]
+                Foods[i,] <<- solution
+                f[i]<<- ObjValSol
+                fitness[i]<<-FitnessSol
+            }
+            else {
+                # the solution i can not be improved, increase its trial counter*/
+                trial[i] <<- trial[i]+1
+            }
+        }
+    }
+    
+    
+    # A food source is chosen with the probability which is proportioal to its quality*/
+    # Different schemes can be used to calculate the probability values*/
+    # For example prob(i)=fitness(i)/sum(fitness)*/
+    # or in a way used in the metot below prob(i)=a*fitness(i)/max(fitness)+b*/
+    # probability values are calculated by using fitness values and normalized by dividing maximum fitness value*/
+    CalculateProbabilities <- function() {
+        maxfit <- fitness[1]
+        for (i in 1:FoodNumber) 
+            if (fitness[i] > maxfit) maxfit <- fitness[i]
+        
+        prob <<- .9*(fitness/(maxfit+1e-20)) + .1
+        #     prob[is.nan(prob)]  <<- .1
+    }
+    
+    SendOnlookerBees <- function()
+    {
+        # Onlooker Bee phase
+        i <- 1
+        t <- 0
+        while (t < FoodNumber)
+        {
+            
+            # choose a food source depending on its probability to be chosen
+            if (runif(1) < prob[i]) {
+                t <- t + 1
+                
+                # The parameter to be changed is determined randomly
+                param2change <- sample(1:D, 1) # floor(runif(1)*D) + 1 
+                
+                # A randomly chosen solution is used in producing a mutant solution of the solution i
+                #Randomly selected solution must be different from the solution i*/        
+                neighbour <- i
+                while(neighbour==i)
+                    neighbour <- sample(1:FoodNumber, 1) # floor(runif(1)*FoodNumber) + 1
+                
+                solution <<- Foods[i,]
+                
+                # v_{ij}=x_{ij}+\phi_{ij}*(x_{kj}-x_{ij}) */
+                
+                if (optiinteger) solution[param2change] <<- runif(1) > .5
+                else 
+                {
+                    solution[param2change] <<- 
+                        Foods[i,param2change]+
+                        (Foods[i,param2change]-Foods[neighbour,param2change])*(runif(1)-0.5)*2
+                    
+                    # if generated parameter value is out of boundaries, it is shifted onto the boundaries*/
+                    if (solution[param2change]<lb[param2change]) 
+                        solution[param2change] <<- lb[param2change]
+                    
+                    if (solution[param2change]>ub[param2change]) 
+                        solution[param2change] <<- ub[param2change]
+                    
+                }
+                
+                ObjValSol <<- fun(solution)
+                FitnessSol <<- CalculateFitness(ObjValSol)
+                
+                # a greedy selection is applied between the current solution i and its mutant*/
+                if (FitnessSol>fitness[i])
+                {
+                    # If the mutant solution is better than the current solution i, replace the solution with the mutant and reset the trial counter of solution i*/
+                    trial[i] <<- 0
+                    Foods[i,] <<- solution
+                    
+                    f[i]<<-ObjValSol
+                    fitness[i]<<-FitnessSol
+                } #if the solution i can not be improved, increase its trial counter*/
+                else trial[i] <<- trial[i]+1
+            }
+            i <- i + 1
+            if (i==FoodNumber) i <- 1
+            # end of onlooker bee phase
+        }
+    }
+    
+    # determine the food sources whose trial counter exceeds the "limit" value.
+    # In Basic ABC, only one scout is allowed to occur in each cycle*/
+    
+    SendScoutBees <- function() {
+        maxtrialindex <- 1
+        for (i in 1:FoodNumber) {
+            if (trial[i] > trial[maxtrialindex]) maxtrialindex <- i
+        }
+        
+        if (trial[maxtrialindex] >= limit) init(maxtrialindex)
+    }
+    
+    persistance <- 0
+    
+    # Inicializa funcion
+    initial()
+    
+    # Memoriza la primera mejor solucion
+    MemorizeBestSource() 
+    
+    ans  <- matrix(0, ncol = D, nrow=maxCycle)
+    iter <- 0
+    # Comienza a iterar
+    while ((iter <- iter + 1) < maxCycle)
+    {
+        SendEmployedBees()
+        CalculateProbabilities()
+        SendOnlookerBees() 
+        MemorizeBestSource()
+        
+        # Storing parameter and breaking out
+        ans[iter,] <- GlobalParams
+        if (persistance > criter) break
+        
+        SendScoutBees()
+    }
+    
+    return(
+        structure(list(
+            Foods   = Foods,
+            f       = f,
+            fn      = fn,
+            fitness = fitness,
+            trial   = trial,
+            value   = fun(GlobalParams),
+            par     = GlobalParams,
+            counts  = c("function"=iter),
+            hist    = ans[1:iter,,drop=FALSE]
+        ), class="abc_answer"
+        ))
+
+}
+
+```
+
+# Algorithm implementation
+
+## **Example 1**: The minimum is at (pi,pi)
+
+```{r}
+# Minimisation of the objective function
+fun <- function(x) {
+  -cos(x[1])*cos(x[2])*exp(-((x[1] - pi)^2 + (x[2] - pi)^2))
+}
+
+ans <- artificial_bee_colony(rep(0,2), fun, lb=-10, ub=10, criter=50)
+ans[c("par", "counts", "value")]
+```
+
+```{r}
+# Maximisation of the objective function 
+
+fun <- function(x) {
+  # We've removed the '-' from the equation
+  cos(x[1])*cos(x[2])*exp(-((x[1] - pi)^2 + (x[2] - pi)^2))
+}
+ans <- artificial_bee_colony(rep(0,2), fun, lb=-10, ub=10, criter=50)
+ans[c("par", "counts", "value")]
+
+```
+
+## **Example 2**: global minimum at about (-15.81515)
+
+```{r}
+fw <- function (x){
+    10*sin(0.3*x)*sin(1.3*x^2) + 0.00001*x^4 + 0.2*x+80
+}
+
+ans <- artificial_bee_colony(50, fw, lb=-100, ub=100, criter=100)
+ans[c("par", "counts", "value")]
+```
+
+## 
+
+## **Example 3:** 5D sphere, global minimum at about (0,0,0,0,0)
+
+```{r}
+fs <- function(x) sum(x^2)
+
+ans <- artificial_bee_colony(rep(10,5), fs, lb=-100, ub=100, criter=200)
+ans[c("par", "counts", "value")]
+```
+
+## **Example 4:** An Ordinary Linear Regression
+
+```{r}
+set.seed(1231)
+k <- 4
+n <- 5e2
+
+# Data generating process
+w <- matrix(rnorm(k), ncol=1)     # This are the model parameters
+X <- matrix(rnorm(k*n), ncol = k) # This are the controls
+y <- X %*% w                      # This is the observed data
+
+# Objective function
+fun <- function(x) {
+  sum((y - X%*%x)^2)
+}
+
+# Running the regression
+ans <- artificial_bee_colony(rep(0,k), fun, lb = -10000, ub=10000)
+
+# Here are the outcomes: Both columns should be the same
+cbind(ans$par, w)
+
+# This is just like OLS, with no constant
+coef(lm(y~0+X))
+```
